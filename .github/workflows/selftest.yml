@@ -1,0 +1,67 @@
+name: Self-test (macOS)
+
+# Copi 的自动测试（真实的按键、鼠标事件）跑在 GitHub 的 macOS 虚拟机上，不占用开发者自己的电脑。
+# 报告在这次运行的 Summary 里，也作为 selftest-report 上传
+# main：公开的测试仓库（只有一个提交，每次推送用新的快照覆盖）
+on:
+  push:
+    branches: [main, fix/copy-paste-reliability, fix/clipboard-gaps]
+  workflow_dispatch:
+
+jobs:
+  selftest:
+    runs-on: macos-15
+    timeout-minutes: 90
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: "1"
+      HOMEBREW_NO_INSTALL_CLEANUP: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Copi (Release, ad-hoc signed)
+        run: |
+          xcodebuild -project Copi.xcodeproj -scheme Copi -configuration Release -derivedDataPath build/DD \
+            -skipMacroValidation -skipPackagePluginValidation \
+            CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM= PROVISIONING_PROFILE_SPECIFIER= \
+            build -quiet
+
+      - name: Build the self-test app
+        run: Tools/SelfTest/build.sh
+
+      # 只跑几组（省 macOS 的运行时间）：提交里放一个 Tools/SelfTest/ci-groups，写上组名，逗号分开；没有这个文件时全跑
+      - name: Choose the test groups
+        run: |
+          if [ -f Tools/SelfTest/ci-groups ]; then
+            echo "SELFTEST_GROUPS=$(tr -d ' \n' < Tools/SelfTest/ci-groups)" >> "$GITHUB_ENV"
+          fi
+
+      - name: Install the apps the tests use
+        run: |
+          groups="${SELFTEST_GROUPS:-all}"
+          wants() { [ "$groups" = all ] || [[ ",$groups," == *",$1,"* ]]; }
+          casks=""
+          if wants browsers || wants browsermore || wants matrix || wants concealed || wants vm; then casks="$casks google-chrome"; fi
+          if wants iterm; then casks="$casks iterm2"; fi
+          if wants vscode; then casks="$casks visual-studio-code"; fi
+          [ -n "$casks" ] && brew install --cask $casks
+          if wants terminal || wants iterm; then brew install tmux neovim; fi
+          # 第一次打开从网上下载的 App 会弹出确认框：去掉隔离标记
+          for app in "Google Chrome" "iTerm" "Visual Studio Code"; do
+            sudo xattr -dr com.apple.quarantine "/Applications/$app.app" 2>/dev/null || true
+          done
+
+      - name: Run the self-test
+        run: Tools/SelfTest/ci.sh
+
+      - name: Upload the report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: selftest-report
+          path: |
+            build/selftest/report.md
+            build/selftest/run.log
+            build/selftest/copi.log
+            build/selftest/copi-stdout.log
+            build/selftest/ci-env.log
+          if-no-files-found: warn
